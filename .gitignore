@@ -1,0 +1,15 @@
+# Compiled executables
+peerconnection_server
+webrtc_sender
+webrtc_receiver
+
+# Video files
+*.y4m
+
+# Compiled object files
+*.o
+*.obj
+
+# Editor/IDE files
+.DS_Store
+Thumbs.db
