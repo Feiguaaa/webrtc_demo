@@ -1,6 +1,6 @@
 # Compiled binaries
-webrtc_sender
-webrtc_receiver
+sender
+receiver
 peerconnection_server
 
 # Video files
