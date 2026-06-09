@@ -35,6 +35,7 @@
 #include "api/scoped_refptr.h"
 #include "api/task_queue/task_queue_factory.h"
 #include "api/test/create_frame_generator.h"
+#include "api/transport/bitrate_settings.h"
 #include "api/units/time_delta.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_source_interface.h"
@@ -67,6 +68,10 @@
 #include "test/platform_video_capturer.h"
 #include "test/test_video_capturer.h"
 #include "test/testsupport/y4m_frame_generator.h"
+
+ABSL_FLAG(int, max_bitrate, 1000,
+          "Max video bitrate in kbps. Reduces if streaming 1-2s then "
+          "freezing/garbled.");
 
 namespace {
 
@@ -282,6 +287,11 @@ class Sender : public webrtc::PeerConnectionObserver,
       client_->SignOut();
       return;
     }
+    // Limit bitrate to avoid congestion that causes garbled/frozen video.
+    webrtc::BitrateSettings bitrate;
+    int max_kbps = absl::GetFlag(FLAGS_max_bitrate);
+    bitrate.max_bitrate_bps = max_kbps * 1000;
+    peer_connection_->SetBitrate(bitrate);
     AddTracks();
     peer_connection_->CreateOffer(
         this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
