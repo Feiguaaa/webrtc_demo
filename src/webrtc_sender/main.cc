@@ -31,6 +31,7 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/rtc_error.h"
+#include "api/rtp_parameters.h"
 #include "api/rtp_sender_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/task_queue/task_queue_factory.h"
@@ -367,6 +368,19 @@ class Sender : public webrtc::PeerConnectionObserver,
                           << result.error().message();
       } else {
         RTC_LOG(LS_INFO) << "Video track added.";
+        // Disable WebRTC's automatic resolution adaptation so source
+        // resolution is preserved (no downscaling due to CPU/bandwidth).
+        auto sender = result.value();
+        auto params = sender->GetParameters();
+        params.degradation_preference =
+            webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+        auto err = sender->SetParameters(params);
+        if (err.ok()) {
+          RTC_LOG(LS_INFO) << "Degradation preference set to MAINTAIN_RESOLUTION.";
+        } else {
+          RTC_LOG(LS_WARNING) << "Failed to set degradation preference: "
+                              << err.message();
+        }
       }
     } else {
       RTC_LOG(LS_WARNING) << "No video source available.";
