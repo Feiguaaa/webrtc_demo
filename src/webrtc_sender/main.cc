@@ -294,16 +294,8 @@ class Sender : public webrtc::PeerConnectionObserver,
       client_->SignOut();
       return;
     }
-    int max_kbps = absl::GetFlag(FLAGS_max_bitrate);
-    if (max_kbps > 0) {
-      // Cap bitrate to avoid congestion that causes garbled/frozen video.
-      // WebRTC's internal GCC still adapts within this cap.
-      webrtc::BitrateSettings bitrate;
-      bitrate.max_bitrate_bps = max_kbps * 1000;
-      peer_connection_->SetBitrate(bitrate);
-    } else {
-      RTC_LOG(LS_INFO) << "No bitrate cap — using full WebRTC adaptive congestion control.";
-    }
+    // max_bitrate will be applied per-stream via RtpEncodingParameters
+    // in AddTracks(), which actually controls the VP8 encoder target.
     AddTracks();
     peer_connection_->CreateOffer(
         this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
@@ -426,11 +418,23 @@ class Sender : public webrtc::PeerConnectionObserver,
         auto params = sender->GetParameters();
         params.degradation_preference =
             webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+        // Override codec-level bitrate cap so VP8 1080p can use available
+        // bandwidth instead of being limited to its default 2.5 Mbps.
+        int max_kbps = absl::GetFlag(FLAGS_max_bitrate);
+        if (max_kbps > 0) {
+          if (params.encodings.empty()) {
+            params.encodings.push_back({});
+          }
+          params.encodings[0].max_bitrate_bps = max_kbps * 1000;
+        }
         auto err = sender->SetParameters(params);
         if (err.ok()) {
-          RTC_LOG(LS_INFO) << "Degradation preference set to MAINTAIN_RESOLUTION.";
+          RTC_LOG(LS_INFO) << "Sender parameters updated (max_bitrate="
+                           << (max_kbps > 0 ? std::to_string(max_kbps) + " kbps"
+                                            : "unlimited")
+                           << ", degradation=MAINTAIN_RESOLUTION).";
         } else {
-          RTC_LOG(LS_WARNING) << "Failed to set degradation preference: "
+          RTC_LOG(LS_WARNING) << "Failed to set sender parameters: "
                               << err.message();
         }
       }
