@@ -325,6 +325,9 @@ void Receiver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
 
+  // Enable INFO-level logging (suppressed by default in release builds).
+  webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
+
   webrtc::Environment env =
       webrtc::CreateEnvironment(std::make_unique<webrtc::FieldTrials>(
           absl::GetFlag(FLAGS_force_fieldtrials)));

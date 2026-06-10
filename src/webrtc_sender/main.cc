@@ -34,6 +34,9 @@
 #include "api/rtp_parameters.h"
 #include "api/rtp_sender_interface.h"
 #include "api/scoped_refptr.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtc_stats_report.h"
+#include "api/stats/rtcstats_objects.h"
 #include "api/task_queue/task_queue_factory.h"
 #include "api/test/create_frame_generator.h"
 #include "api/transport/bitrate_settings.h"
@@ -257,6 +260,9 @@ class Sender : public webrtc::PeerConnectionObserver,
   void OnIceConnectionChange(
       webrtc::PeerConnectionInterface::IceConnectionState new_state) override {
     RTC_LOG(LS_INFO) << "ICE connection state: " << new_state;
+    if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected) {
+      StartStatsPolling();
+    }
     if (new_state ==
         webrtc::PeerConnectionInterface::kIceConnectionDisconnected) {
       RTC_LOG(LS_INFO) << "ICE disconnected. Exiting.";
@@ -351,10 +357,56 @@ class Sender : public webrtc::PeerConnectionObserver,
   }
 
   void DeletePeerConnection() {
+    stats_polling_active_ = false;
     peer_connection_ = nullptr;
     peer_connection_factory_ = nullptr;
     local_video_source_ = nullptr;
     peer_id_ = -1;
+  }
+
+  void StartStatsPolling() {
+    if (stats_polling_active_) return;
+    stats_polling_active_ = true;
+    ScheduleStatsQuery();
+  }
+
+  void ScheduleStatsQuery() {
+    if (!stats_polling_active_) return;
+    webrtc::TaskQueueBase::Current()->PostDelayedTask(
+        [this]() { QueryStats(); }, webrtc::TimeDelta::Seconds(5));
+  }
+
+  void QueryStats() {
+    if (!peer_connection_ || !stats_polling_active_) return;
+    class FpsCallback : public webrtc::RTCStatsCollectorCallback {
+     public:
+      FpsCallback(Sender* sender) : sender_(sender) {}
+      void OnStatsDelivered(
+          const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report)
+          override {
+        if (!sender_->stats_polling_active_) return;
+        auto outbounds =
+            report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>();
+        for (const auto* s : outbounds) {
+          if (!s->frame_width.has_value()) continue;  // only video
+          RTC_LOG(LS_INFO) << "[SEND] "
+                           << "fps=" << s->frames_per_second.value_or(0)
+                           << " frames=" << s->frames_encoded.value_or(0)
+                           << " res=" << s->frame_width.value_or(0)
+                           << "x" << s->frame_height.value_or(0)
+                           << " lim="
+                           << s->quality_limitation_reason.value_or("none")
+                           << " kbps="
+                           << (s->target_bitrate.value_or(0) / 1000.0);
+        }
+        sender_->ScheduleStatsQuery();
+      }
+
+     private:
+      Sender* sender_;
+    };
+    peer_connection_->GetStats(
+        webrtc::make_ref_counted<FpsCallback>(this).get());
   }
 
   void AddTracks() {
@@ -399,6 +451,7 @@ class Sender : public webrtc::PeerConnectionObserver,
     client_->SendToPeer(peer_id_, json_object);
   }
 
+  bool stats_polling_active_ = false;
   int peer_id_ = -1;
   const webrtc::Environment& env_;
   PeerConnectionClient* client_;
@@ -429,6 +482,9 @@ void Sender::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
+
+  // Enable INFO-level logging (suppressed by default in release builds).
+  webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
 
   webrtc::Environment env =
       webrtc::CreateEnvironment(std::make_unique<webrtc::FieldTrials>(
