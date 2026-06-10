@@ -64,6 +64,12 @@ void Y4mVideoSink::OnFrame(const webrtc::VideoFrame& frame) {
   int width = buffer->width();
   int height = buffer->height();
 
+  if (width != last_width_ || height != last_height_) {
+    RTC_LOG(LS_INFO) << "Frame resolution: " << width << "x" << height;
+    last_width_ = width;
+    last_height_ = height;
+  }
+
   if (!header_written_) {
     WriteHeader(width, height);
   }

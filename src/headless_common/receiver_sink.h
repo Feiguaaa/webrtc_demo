@@ -31,6 +31,8 @@ class Y4mVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
   FILE* file_ = nullptr;
   bool is_popen_ = false;
   bool header_written_ = false;
+  int last_width_ = 0;
+  int last_height_ = 0;
 };
 
 #endif  // EXAMPLES_PEERCONNECTION_HEADLESS_COMMON_RECEIVER_SINK_H_
