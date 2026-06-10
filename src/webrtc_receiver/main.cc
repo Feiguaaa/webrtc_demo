@@ -15,6 +15,11 @@
 #include <utility>
 
 #include "absl/flags/flag.h"
+
+// Suppress warnings for this demo code.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 #include "absl/flags/parse.h"
 #include "absl/memory/memory.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
@@ -50,6 +55,7 @@
 #include "examples/peerconnection/client/peer_connection_client.h"
 #include "examples/peerconnection/headless_common/headless_socket_server.h"
 #include "examples/peerconnection/headless_common/receiver_sink.h"
+#include "examples/peerconnection/headless_common/sdl_renderer.h"
 #include "examples/peerconnection/headless_common/signaling_helper.h"
 #include "json/reader.h"
 #include "json/writer.h"
@@ -61,8 +67,12 @@
 ABSL_FLAG(std::string, output_file, "received.y4m",
           "Path to write the received Y4M video.");
 ABSL_FLAG(bool, play, false,
-          "Play received video in real-time using ffplay "
+          "Play received video in real-time using an SDL window "
           "(ignores --output_file).");
+ABSL_FLAG(int, width, 640,
+          "Initial SDL window width. Auto-resizes to incoming video.");
+ABSL_FLAG(int, height, 480,
+          "Initial SDL window height. Auto-resizes to incoming video.");
 
 namespace {
 
@@ -73,17 +83,11 @@ class Receiver : public webrtc::PeerConnectionObserver,
   Receiver(const webrtc::Environment& env,
            PeerConnectionClient* client,
            const std::string& output_file,
-           bool play)
-      : env_(env), client_(client) {
-    if (play) {
-      FILE* pipe = popen("ffplay -f yuv4mpegpipe -i pipe:0:", "w");
-      if (!pipe) {
-        RTC_LOG(LS_ERROR) << "Failed to start ffplay. Is it installed?";
-        y4m_sink_ = std::make_unique<Y4mVideoSink>(output_file);
-      } else {
-        y4m_sink_ = std::make_unique<Y4mVideoSink>(pipe);
-      }
-    } else {
+           bool play,
+           SdlVideoRenderer* sdl_renderer)
+      : env_(env), client_(client), sdl_renderer_(sdl_renderer),
+        play_(play), output_file_(output_file) {
+    if (!play_) {
       y4m_sink_ = std::make_unique<Y4mVideoSink>(output_file);
     }
     client_->RegisterObserver(this);
@@ -190,8 +194,20 @@ class Receiver : public webrtc::PeerConnectionObserver,
         track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
       auto* video_track =
           static_cast<webrtc::VideoTrackInterface*>(track.get());
-      video_track->AddOrUpdateSink(y4m_sink_.get(), webrtc::VideoSinkWants());
-      RTC_LOG(LS_INFO) << "Y4mVideoSink registered on incoming video track.";
+      if (play_) {
+        if (sdl_renderer_ && sdl_renderer_->initialized()) {
+          video_track->AddOrUpdateSink(
+              static_cast<webrtc::VideoSinkInterface<webrtc::VideoFrame>*>(
+                  sdl_renderer_),
+              webrtc::VideoSinkWants());
+          RTC_LOG(LS_INFO) << "SdlVideoRenderer registered on incoming video track.";
+        } else {
+          RTC_LOG(LS_ERROR) << "SDL renderer not initialized, cannot display video.";
+        }
+      } else {
+        video_track->AddOrUpdateSink(y4m_sink_.get(), webrtc::VideoSinkWants());
+        RTC_LOG(LS_INFO) << "Y4mVideoSink registered on incoming video track.";
+      }
     }
   }
 
@@ -302,6 +318,9 @@ class Receiver : public webrtc::PeerConnectionObserver,
   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
       peer_connection_factory_;
   std::unique_ptr<Y4mVideoSink> y4m_sink_;
+  SdlVideoRenderer* sdl_renderer_ = nullptr;  // Not owned, created in main().
+  bool play_ = false;
+  std::string output_file_;
 };
 
 void Receiver::OnIceCandidate(const webrtc::IceCandidate* candidate) {
@@ -349,19 +368,44 @@ int main(int argc, char* argv[]) {
     peer_name = GetPeerName();
   }
 
-  SetupSignalHandler();
   webrtc::InitializeSSL();
 
   HeadlessSocketServer socket_server;
   webrtc::AutoSocketServerThread thread(&socket_server);
 
+  // Create SDL renderer on the main thread (before thread.Run()).
+  SdlVideoRenderer* sdl_renderer = nullptr;
+  std::unique_ptr<SdlVideoRenderer> sdl_renderer_owner;
+  if (play) {
+    int win_width = absl::GetFlag(FLAGS_width);
+    int win_height = absl::GetFlag(FLAGS_height);
+    sdl_renderer_owner = std::make_unique<SdlVideoRenderer>(
+        "WebRTC Receiver", win_width, win_height);
+    sdl_renderer = sdl_renderer_owner.get();
+  }
+
   PeerConnectionClient client;
   auto receiver =
-      webrtc::make_ref_counted<Receiver>(env, &client, output_file, play);
+      webrtc::make_ref_counted<Receiver>(env, &client, output_file, play,
+                                         sdl_renderer);
   client.Connect(server, port, peer_name);
 
-  thread.Run();
+  // Run the message loop, pumping SDL rendering between messages.
+  if (play && sdl_renderer) {
+    SetupSignalHandler();  // This calls Thread::Current()->Quit() on SIGINT.
+
+    webrtc::Thread* main_thread = webrtc::Thread::Current();
+    // ProcessMessages returns false when Quit() has been called.
+    while (main_thread->ProcessMessages(16)) {
+      sdl_renderer->RenderPendingFrames();
+    }
+    RTC_LOG(LS_INFO) << "Exiting main loop.";
+  } else {
+    thread.Run();
+  }
 
   webrtc::CleanupSSL();
   return 0;
 }
+
+#pragma clang diagnostic pop

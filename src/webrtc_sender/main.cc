@@ -16,6 +16,11 @@
 #include <vector>
 
 #include "absl/flags/flag.h"
+
+// Suppress warnings for this demo code.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 #include "absl/flags/parse.h"
 #include "absl/memory/memory.h"
 #include "api/audio/audio_device.h"
@@ -72,6 +77,10 @@
 ABSL_FLAG(int, max_bitrate, 1000,
           "Max video bitrate in kbps. Reduces if streaming 1-2s then "
           "freezing/garbled.");
+ABSL_FLAG(int, width, 640,
+          "Video capture width. Used only with camera/synthetic source.");
+ABSL_FLAG(int, height, 480,
+          "Video capture height. Used only with camera/synthetic source.");
 
 namespace {
 
@@ -92,8 +101,8 @@ std::unique_ptr<TestVideoCapturer> CreateCapturer(
         webrtc::Clock::GetRealTimeClock(), std::move(frame_generator), fps,
         task_queue_factory);
   }
-  const size_t kWidth = 640;
-  const size_t kHeight = 480;
+  const size_t kWidth = absl::GetFlag(FLAGS_width);
+  const size_t kHeight = absl::GetFlag(FLAGS_height);
   const size_t kFps = 30;
   std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> info(
       webrtc::VideoCaptureFactory::CreateDeviceInfo());
@@ -453,3 +462,5 @@ int main(int argc, char* argv[]) {
   webrtc::CleanupSSL();
   return 0;
 }
+
+#pragma clang diagnostic pop

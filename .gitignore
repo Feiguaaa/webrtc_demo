@@ -2,6 +2,6 @@
 sender
 receiver
 peerconnection_server
-
+out
 # Video files
 *.y4m
