@@ -70,8 +70,8 @@
 #include "test/testsupport/y4m_frame_generator.h"
 
 ABSL_FLAG(int, max_bitrate, 1000,
-          "Max video bitrate in kbps. Reduces if streaming 1-2s then "
-          "freezing/garbled.");
+          "Max video bitrate in kbps (0 = no limit, full adaptive). "
+          "Reduces if streaming 1-2s then freezing/garbled.");
 
 namespace {
 
@@ -287,11 +287,16 @@ class Sender : public webrtc::PeerConnectionObserver,
       client_->SignOut();
       return;
     }
-    // Limit bitrate to avoid congestion that causes garbled/frozen video.
-    webrtc::BitrateSettings bitrate;
     int max_kbps = absl::GetFlag(FLAGS_max_bitrate);
-    bitrate.max_bitrate_bps = max_kbps * 1000;
-    peer_connection_->SetBitrate(bitrate);
+    if (max_kbps > 0) {
+      // Cap bitrate to avoid congestion that causes garbled/frozen video.
+      // WebRTC's internal GCC still adapts within this cap.
+      webrtc::BitrateSettings bitrate;
+      bitrate.max_bitrate_bps = max_kbps * 1000;
+      peer_connection_->SetBitrate(bitrate);
+    } else {
+      RTC_LOG(LS_INFO) << "No bitrate cap — using full WebRTC adaptive congestion control.";
+    }
     AddTracks();
     peer_connection_->CreateOffer(
         this, webrtc::PeerConnectionInterface::RTCOfferAnswerOptions());
