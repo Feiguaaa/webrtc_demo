@@ -67,6 +67,7 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
+#include "rtc_base/physical_socket_server.h"
 #include "rtc_base/strings/json.h"
 #include "rtc_base/thread.h"
 #include "test/frame_generator_capturer.h"
@@ -81,6 +82,15 @@ ABSL_FLAG(int, width, 640,
           "Video capture width. Used only with camera/synthetic source.");
 ABSL_FLAG(int, height, 480,
           "Video capture height. Used only with camera/synthetic source.");
+ABSL_FLAG(bool, low_latency, false,
+          "Enable low-latency streaming mode. "
+          "Reduces NACK delay and limits retransmissions.");
+ABSL_FLAG(double, simulate_loss, 0.0,
+          "Simulate UDP packet loss rate (0.0 to 1.0). "
+          "E.g., 0.05 = 5%% packet loss.");
+ABSL_FLAG(std::string, periodic_loss, "",
+          "Periodic packet loss pattern: '<interval_ms>:<drop_count>'. "
+          "E.g., '2000:3' = drop 3 packets every 2 seconds.");
 
 namespace {
 
@@ -420,9 +430,18 @@ void Sender::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
 
+  // Build field trials string, appending low-latency trials if requested.
+  std::string field_trials = absl::GetFlag(FLAGS_force_fieldtrials);
+  if (absl::GetFlag(FLAGS_low_latency)) {
+    if (!field_trials.empty())
+      field_trials += " ";
+    field_trials +=
+        "WebRTC-SendNackDelayMs/delay:0/WebRTC-JitterEstimatorConfig/nack_limit:3/";
+  }
+
   webrtc::Environment env =
       webrtc::CreateEnvironment(std::make_unique<webrtc::FieldTrials>(
-          absl::GetFlag(FLAGS_force_fieldtrials)));
+          field_trials));
 
   int port = absl::GetFlag(FLAGS_port);
   if (port < 1 || port > 65535) {
@@ -448,6 +467,28 @@ int main(int argc, char* argv[]) {
   }
 
   SetupSignalHandler();
+
+  double loss_rate = absl::GetFlag(FLAGS_simulate_loss);
+  if (loss_rate > 0.0) {
+    webrtc::SetPacketLossRate(loss_rate);
+    printf("Packet loss simulation enabled: %.1f%% random loss\n",
+           loss_rate * 100);
+  }
+
+  std::string periodic = absl::GetFlag(FLAGS_periodic_loss);
+  if (!periodic.empty()) {
+    size_t colon = periodic.find(':');
+    if (colon != std::string::npos) {
+      int64_t interval_ms = std::stoll(periodic.substr(0, colon));
+      int drop_count = std::stoi(periodic.substr(colon + 1));
+      webrtc::SetPeriodicLoss(interval_ms * 1000, drop_count);
+      printf("Periodic packet loss: drop %d packets every %lld ms\n",
+             drop_count, (long long)interval_ms);
+    } else {
+      printf("Invalid periodic_loss format, expected '<ms>:<count>'\n");
+    }
+  }
+
   webrtc::InitializeSSL();
 
   HeadlessSocketServer socket_server;

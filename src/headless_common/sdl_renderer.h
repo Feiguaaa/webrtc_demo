@@ -19,6 +19,7 @@
 
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
+#include "api/rtp_packet_infos.h"
 
 struct FrameData {
   std::vector<uint8_t> bgra_data;
@@ -26,39 +27,55 @@ struct FrameData {
   int height = 0;
 };
 
-// Tracks per-frame packet loss using RTP timestamps and real packet counts
-// from WebRTC's packet_infos() (populated by RtpVideoStreamReceiver2).
+// Tracks frame loss by detecting RTP timestamp gaps.
+// When packets are dropped and NACK is disabled, frames become
+// undecodable and are skipped. This tracker detects skipped frames
+// via RTP timestamp delta analysis.
 class FrameLossTracker {
  public:
-  FrameLossTracker() = default;
+  FrameLossTracker();
+  explicit FrameLossTracker(const std::string& output_csv);
+  ~FrameLossTracker();
 
-  // Call for every received frame. Prints per-frame packet info.
-  // frame_bytes: size of the I420 frame data (Y+U+V planes).
-  // packet_count: real RTP packet count from frame.packet_infos().size().
-  // time_us: frame timestamp in microseconds (for FPS calculation).
-  void OnFrameReceived(uint32_t rtp_timestamp, int width, int height,
-                       int frame_bytes, int packet_count, int64_t time_us);
+  // Call for every received frame. Detects skipped frames by
+  // comparing RTP timestamp delta against expected interval.
+  void OnFrameReceived(const webrtc::RtpPacketInfos& packet_infos,
+                       uint32_t rtp_timestamp, int width, int height,
+                       int64_t time_us);
 
  private:
+  void OpenCsv(const std::string& output_csv);
+
+  // Estimate expected RTP interval from first few frames.
+  int EstimateInterval(uint32_t delta);
+
   int frame_count_ = 0;
   uint32_t prev_rtp_timestamp_ = 0;
   int prev_width_ = 0;
   int prev_height_ = 0;
 
-  // Interval detection (first 10 frames).
-  int detected_interval_ = 0;
+  // Expected RTP interval (detected from first frames).
+  int expected_interval_ = 0;
   int interval_samples_ = 0;
-  int64_t interval_sum_ = 0;
 
-  // Rolling average packets per frame (for estimating lost frame packets).
-  double avg_packets_per_frame_ = 0.0;
-  int avg_samples_ = 0;
-  int64_t avg_packet_sum_ = 0;
+  // Rolling count of expected vs received frames.
+  int total_expected_ = 0;
+  int total_received_ = 0;
+  int cumulative_lost_ = 0;
 
   // Per-second frame counter.
   int64_t second_start_us_ = 0;
   int frames_this_second_ = 0;
   int prev_fps_ = 0;
+
+  // Rolling bitrate calculation (30-frame window).
+  int64_t bitrate_window_bytes_ = 0;
+  int64_t bitrate_window_time_us_ = 0;
+  int bitrate_window_frames_ = 0;
+  int64_t prev_bitrate_kbps_ = 0;
+
+  // CSV output for plotting.
+  FILE* csv_ = nullptr;
 };
 
 class FrameBuffer {

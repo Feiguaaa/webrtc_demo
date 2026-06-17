@@ -24,12 +24,46 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-void FrameLossTracker::OnFrameReceived(uint32_t rtp_timestamp, int width,
-                                        int height, int frame_bytes,
-                                        int packet_count, int64_t time_us) {
+// WebRTC video uses 90kHz RTP timestamps. A 30fps stream has
+// RTP delta = 3000 per frame. When UDP packets are dropped and
+// NACK is disabled, the frame becomes undecodable and is skipped.
+// We detect skipped frames by comparing actual RTP delta to the
+// expected per-frame interval.
+static constexpr int kVideoClockHz = 90000;
+
+FrameLossTracker::FrameLossTracker() {
+  OpenCsv("/tmp/frame_loss.csv");
+}
+
+FrameLossTracker::FrameLossTracker(const std::string& output_csv) {
+  OpenCsv(output_csv);
+}
+
+void FrameLossTracker::OpenCsv(const std::string& output_csv) {
+  csv_ = fopen(output_csv.c_str(), "w");
+  if (csv_) {
+    fprintf(csv_, "frame_number,width,height,received_packets,"
+            "skipped_frames,loss_rate,cumulative_loss_rate\n");
+  }
+}
+
+FrameLossTracker::~FrameLossTracker() {
+  if (csv_) {
+    fclose(csv_);
+  }
+}
+
+int FrameLossTracker::EstimateInterval(uint32_t delta) {
+  if (delta == 0 || delta > 50000) return 0;
+  return static_cast<int>(delta);
+}
+
+void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_infos,
+                                        uint32_t rtp_timestamp, int width,
+                                        int height, int64_t time_us) {
   frame_count_++;
 
-  // Per-second frame counter (uses wall clock from frame timestamp).
+  // Per-second frame counter.
   if (second_start_us_ == 0) {
     second_start_us_ = time_us;
   }
@@ -40,62 +74,112 @@ void FrameLossTracker::OnFrameReceived(uint32_t rtp_timestamp, int width,
     second_start_us_ = time_us;
   }
 
-  // Update rolling average packets per frame (from real packet count).
-  avg_samples_++;
-  avg_packet_sum_ += packet_count;
-  if (avg_samples_ >= 30) {
-    avg_packets_per_frame_ = static_cast<double>(avg_packet_sum_) / avg_samples_;
-    avg_samples_ = 0;
-    avg_packet_sum_ = 0;
-  }
+  int received_pkts = static_cast<int>(packet_infos.size());
+  int skipped = 0;
 
   if (frame_count_ == 1) {
     prev_rtp_timestamp_ = rtp_timestamp;
     prev_width_ = width;
     prev_height_ = height;
+    // First frame: always received.
+    total_received_ = 1;
+    total_expected_ = 1;
+    // Seed bitrate window.
+    bitrate_window_bytes_ = 0;
+  } else {
+    // RTP timestamp delta.
+    uint32_t delta = rtp_timestamp - prev_rtp_timestamp_;
+
+    // Bitrate calculation.
+    int64_t frame_time_us = static_cast<int64_t>(delta) * 1000000LL / kVideoClockHz;
+    int i420_size = width * height + 2 * ((width + 1) / 2) * ((height + 1) / 2);
+    bitrate_window_bytes_ += i420_size;
+    bitrate_window_time_us_ += frame_time_us;
+    bitrate_window_frames_++;
+
+    if (bitrate_window_frames_ >= 30) {
+      if (bitrate_window_time_us_ > 0) {
+        prev_bitrate_kbps_ = bitrate_window_bytes_ * 8000LL / bitrate_window_time_us_;
+      }
+      bitrate_window_bytes_ = 0;
+      bitrate_window_time_us_ = 0;
+      bitrate_window_frames_ = 0;
+    }
+
+    // Detect expected interval from first valid deltas.
+    if (delta > 0 && delta < 10000) {
+      if (interval_samples_ == 0) {
+        expected_interval_ = static_cast<int>(delta);
+        interval_samples_ = 1;
+      } else if (interval_samples_ < 10) {
+        // Early: heavily weight new samples.
+        expected_interval_ =
+            static_cast<int>(0.3 * expected_interval_ + 0.7 * delta);
+        interval_samples_++;
+      } else {
+        // Stable: slow adaptation.
+        expected_interval_ =
+            static_cast<int>(0.95 * expected_interval_ + 0.05 * delta);
+        interval_samples_++;
+      }
+      if (interval_samples_ == 5) {
+        fprintf(stderr,
+                "[LossTracker] Expected RTP interval: %d (~%.1f fps)\n",
+                expected_interval_,
+                kVideoClockHz * 1.0 / expected_interval_);
+      }
+    }
+
+    // Detect skipped frames via RTP timestamp gap.
+    // A delta of 2x expected_interval means 1 frame was lost.
+    // A delta of 3x means 2 frames were lost, etc.
+    if (expected_interval_ > 0 && delta > 0) {
+      // Calculate how many frames this delta represents.
+      // Round to nearest: (delta + interval/2) / interval.
+      int frames_represented = (delta + expected_interval_ / 2) / expected_interval_;
+
+      // Allow some tolerance: if delta is within 50% of expected, it's 1 frame.
+      if (frames_represented > 1) {
+        skipped = frames_represented - 1;
+      }
+    }
+
+    total_expected_ += 1 + skipped;
+    total_received_ += 1;
+    cumulative_lost_ += skipped;
+  }
+
+  // Per-frame loss rate (instantaneous and cumulative).
+  double frame_loss_rate = 0.0;
+  double cumulative_loss_rate = 0.0;
+  if (total_expected_ > 0) {
+    cumulative_loss_rate =
+        static_cast<double>(cumulative_lost_) / total_expected_;
+  }
+  // Instantaneous: frames lost / frames expected for this observation.
+  if (skipped > 0) {
+    frame_loss_rate =
+        static_cast<double>(skipped) / (1 + skipped);
+  }
+
+  // Write to CSV.
+  if (csv_) {
+    fprintf(csv_, "%d,%d,%d,%d,%d,%.4f,%.4f\n",
+            frame_count_, width, height, received_pkts,
+            skipped, frame_loss_rate, cumulative_loss_rate);
+  }
+
+  // Print summary every 30 frames.
+  if (frame_count_ % 30 == 0) {
     fprintf(stderr,
             "[LossTracker] Frame #%d | %dx%d | "
-            "real_pkts=%d recv / %d total / 0 lost | fps=%d\n",
-            frame_count_, width, height, packet_count, packet_count, prev_fps_);
-    return;
+            "pkts=%d | fps=%d | bitrate=%ld kbps | "
+            "expected=%d recv=%d lost=%d cum_loss=%.1f%%\n",
+            frame_count_, width, height, received_pkts,
+            prev_fps_, (long)prev_bitrate_kbps_,
+            total_expected_, total_received_, cumulative_lost_,
+            cumulative_loss_rate * 100);
   }
-
-  // RTP timestamp delta.
-  uint32_t delta = rtp_timestamp - prev_rtp_timestamp_;
-
-  // Detect expected interval from first 10 deltas.
-  if (interval_samples_ < 10 && delta > 0 && delta < 100000) {
-    interval_sum_ += delta;
-    interval_samples_++;
-    if (interval_samples_ == 10) {
-      detected_interval_ = static_cast<int>(interval_sum_ / 10);
-      fprintf(stderr,
-              "[LossTracker] Detected RTP interval: %d (~%.1f fps)\n",
-              detected_interval_, 90000.0 / detected_interval_);
-    }
-  }
-
-  // Calculate lost frames from RTP timestamp gap.
-  int lost_frames = 0;
-  int lost_packets = 0;
-  if (detected_interval_ > 0 && delta > 0) {
-    int expected_intervals = static_cast<int>(delta / detected_interval_);
-    lost_frames = expected_intervals - 1;
-    if (lost_frames > 0) {
-      lost_packets = static_cast<int>(lost_frames * avg_packets_per_frame_);
-    }
-  }
-
-  int total_packets = packet_count + lost_packets;
-  int recv_packets = packet_count;
-
-  fprintf(stderr,
-          "[LossTracker] Frame #%d | %dx%d | "
-          "real_pkts=%d | pkts=%d recv / %d total / %d lost | "
-          "fps=%d\n",
-          frame_count_, width, height,
-          packet_count,
-          recv_packets, total_packets, lost_packets, prev_fps_);
 
   prev_rtp_timestamp_ = rtp_timestamp;
   prev_width_ = width;
@@ -255,17 +339,11 @@ void SdlVideoRenderer::SignalQuit() {
 void SdlVideoRenderer::OnFrame(const webrtc::VideoFrame& frame) {
   ++on_frame_count_;
 
-  // Compute I420 frame size for bitrate estimation.
   int w = frame.width();
   int h = frame.height();
-  int i420_size = w * h + 2 * ((w + 1) / 2) * ((h + 1) / 2);
-
-  // Get real RTP packet count from WebRTC's internal tracking.
-  size_t packet_count = frame.packet_infos().size();
 
   // RTP timestamp-based loss tracking (every frame).
-  loss_tracker_.OnFrameReceived(frame.rtp_timestamp(), w, h,
-                                i420_size, static_cast<int>(packet_count),
+  loss_tracker_.OnFrameReceived(frame.packet_infos(), frame.rtp_timestamp(), w, h,
                                 frame.timestamp_us());
 
   // Called on the WebRTC decode thread.
@@ -303,8 +381,10 @@ void SdlVideoRenderer::RenderPendingFrames() {
 
   // Render all pending frames (keep only the latest).
   FrameData frame;
+  int new_frames = 0;
   while (frame_buffer_.Pop(frame, 0)) {
     ++render_count;
+    ++new_frames;
 
     // Reallocate buffer and texture if dimensions changed.
     if (frame.width != width_ || frame.height != height_) {
@@ -342,7 +422,8 @@ void SdlVideoRenderer::RenderPendingFrames() {
     SDL_RenderPresent(sdl_renderer_);
   }
 
-  if (render_count > 0 && render_count % 30 == 0) {
+  // Print only when new frames were rendered this call.
+  if (new_frames > 0 && render_count % 30 == 0) {
     fprintf(stderr, "[SdlRenderer] Rendered %d frames\n", render_count);
   }
 }

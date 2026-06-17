@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <regex>
 #include <string>
 #include <utility>
 
@@ -73,6 +74,9 @@ ABSL_FLAG(int, width, 640,
           "Initial SDL window width. Auto-resizes to incoming video.");
 ABSL_FLAG(int, height, 480,
           "Initial SDL window height. Auto-resizes to incoming video.");
+ABSL_FLAG(bool, low_latency, false,
+          "Enable low-latency streaming mode. "
+          "Minimizes playout delay, reduces NACK wait time, limits decode queue.");
 
 namespace {
 
@@ -84,9 +88,10 @@ class Receiver : public webrtc::PeerConnectionObserver,
            PeerConnectionClient* client,
            const std::string& output_file,
            bool play,
+           bool low_latency,
            SdlVideoRenderer* sdl_renderer)
       : env_(env), client_(client), sdl_renderer_(sdl_renderer),
-        play_(play), output_file_(output_file) {
+        play_(play), low_latency_(low_latency), output_file_(output_file) {
     if (!play_) {
       y4m_sink_ = std::make_unique<Y4mVideoSink>(output_file);
     }
@@ -154,9 +159,63 @@ class Receiver : public webrtc::PeerConnectionObserver,
         RTC_LOG(LS_ERROR) << "Failed to parse SDP.";
         return;
       }
+
+      // Remove "nack" RTCP feedback from SDP only in low-latency mode.
+      // This prevents the receiver from requesting NACK retransmissions,
+      // so incomplete frames are sent directly to the decoder.
+      std::string sdp = desc->ToString();
+
+      if (low_latency_) {
+        // Count nack lines before removal
+        int nack_count = 0;
+        for (size_t pos = 0; ; ) {
+          pos = sdp.find("a=rtcp-fb:", pos);
+          if (pos == std::string::npos) break;
+          size_t nl = sdp.find('\n', pos);
+          if (nl == std::string::npos) nl = sdp.size();
+          std::string line = sdp.substr(pos, nl - pos);
+          if (line.find(" nack") != std::string::npos) nack_count++;
+          pos = nl + 1;
+        }
+        fprintf(stderr, "[Receiver] SDP has %d nack RTCP feedback lines\n", nack_count);
+
+        sdp = std::regex_replace(sdp,
+            std::regex("a=rtcp-fb:\\d+ nack[^\r\n]*\r?\n"), "");
+        // Also remove RTX payload types (apt=XX)
+        int rtx_count = 0;
+        size_t rtx_pos = 0;
+        while ((rtx_pos = sdp.find("rtx/90000", rtx_pos)) != std::string::npos) {
+          rtx_count++;
+          rtx_pos++;
+        }
+        fprintf(stderr, "[Receiver] Removed %d nack lines, %d rtx entries\n", nack_count, rtx_count);
+
+        sdp = std::regex_replace(sdp,
+            std::regex("a=rtpmap:\\d+ rtx/90000\r?\n"), "");
+        sdp = std::regex_replace(sdp,
+            std::regex("a=fmtp:\\d+ apt=\\d+\r?\n"), "");
+      } else {
+        fprintf(stderr, "[Receiver] NACK enabled (low_latency not set)\n");
+      }
+
+      // Log a snippet of modified SDP for verification
+      size_t media_pos = sdp.find("m=video");
+      if (media_pos != std::string::npos) {
+        size_t end = sdp.find('\n', media_pos);
+        if (end != std::string::npos) {
+          std::string next_lines = sdp.substr(media_pos,
+              std::min((size_t)200, sdp.size() - media_pos));
+          RTC_LOG(LS_INFO) << "Modified SDP video section start: "
+                           << next_lines;
+        }
+      }
+
+      auto modified_desc = webrtc::CreateSessionDescription(desc->GetType(),
+                                                            sdp);
+
       peer_connection_->SetRemoteDescription(
           signaling_helper::DummySetSessionDescriptionObserver::Create().get(),
-          desc.release());
+          modified_desc.release());
 
       auto type_maybe = webrtc::SdpTypeFromString(type_str);
       if (type_maybe && *type_maybe == webrtc::SdpType::kOffer) {
@@ -320,6 +379,7 @@ class Receiver : public webrtc::PeerConnectionObserver,
   std::unique_ptr<Y4mVideoSink> y4m_sink_;
   SdlVideoRenderer* sdl_renderer_ = nullptr;  // Not owned, created in main().
   bool play_ = false;
+  bool low_latency_ = false;
   std::string output_file_;
 };
 
@@ -344,9 +404,18 @@ void Receiver::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
 
+  // Build field trials string, appending low-latency trials if requested.
+  std::string field_trials = absl::GetFlag(FLAGS_force_fieldtrials);
+  if (absl::GetFlag(FLAGS_low_latency)) {
+    if (!field_trials.empty())
+      field_trials += " ";
+    field_trials +=
+        "WebRTC-ZeroPlayoutDelay/enabled,min_pacing:8ms,max_decode_queue_size:3/";
+  }
+
   webrtc::Environment env =
       webrtc::CreateEnvironment(std::make_unique<webrtc::FieldTrials>(
-          absl::GetFlag(FLAGS_force_fieldtrials)));
+          field_trials));
 
   int port = absl::GetFlag(FLAGS_port);
   if (port < 1 || port > 65535) {
@@ -362,6 +431,7 @@ int main(int argc, char* argv[]) {
 
   std::string output_file = absl::GetFlag(FLAGS_output_file);
   bool play = absl::GetFlag(FLAGS_play);
+  bool low_latency = absl::GetFlag(FLAGS_low_latency);
 
   std::string peer_name = absl::GetFlag(FLAGS_name);
   if (peer_name.empty()) {
@@ -387,7 +457,7 @@ int main(int argc, char* argv[]) {
   PeerConnectionClient client;
   auto receiver =
       webrtc::make_ref_counted<Receiver>(env, &client, output_file, play,
-                                         sdl_renderer);
+                                         low_latency, sdl_renderer);
   client.Connect(server, port, peer_name);
 
   // Run the message loop, pumping SDL rendering between messages.

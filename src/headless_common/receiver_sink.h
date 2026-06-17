@@ -17,6 +17,7 @@
 
 #include "api/video/video_frame.h"
 #include "api/video/video_sink_interface.h"
+#include "examples/peerconnection/headless_common/sdl_renderer.h"
 
 class Y4mVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
  public:
@@ -39,6 +40,7 @@ class Y4mVideoSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
   bool play_mode_ = false;
   std::string output_file_;
   int64_t last_timestamp_us_ = 0;
+  FrameLossTracker loss_tracker_;
 };
 
 #endif  // EXAMPLES_PEERCONNECTION_HEADLESS_COMMON_RECEIVER_SINK_H_
