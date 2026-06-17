@@ -47,7 +47,7 @@ def estimate_expected_packets(frame_numbers, packets, widths, i):
 
 
 def main():
-    csv_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/frame_loss.csv"
+    csv_path = sys.argv[1] if len(sys.argv) > 1 else "output/frame_loss.csv"
 
     frame_numbers = []
     packets = []

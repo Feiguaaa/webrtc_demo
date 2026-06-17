@@ -1,7 +1,22 @@
 # Compiled binaries
+out/
 sender
 receiver
 peerconnection_server
-out
+
 # Video files
 *.y4m
+
+# macOS
+.DS_Store
+
+# SDL test files
+sdl2_test*
+sdl2_exact_test*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Misc
+udp_loss_proxy.py

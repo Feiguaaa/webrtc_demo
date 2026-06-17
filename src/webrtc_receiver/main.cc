@@ -77,6 +77,8 @@ ABSL_FLAG(int, height, 480,
 ABSL_FLAG(bool, low_latency, false,
           "Enable low-latency streaming mode. "
           "Minimizes playout delay, reduces NACK wait time, limits decode queue.");
+ABSL_FLAG(bool, reconnect, false,
+          "Automatically reconnect to signaling server when disconnected.");
 
 namespace {
 
@@ -89,9 +91,11 @@ class Receiver : public webrtc::PeerConnectionObserver,
            const std::string& output_file,
            bool play,
            bool low_latency,
-           SdlVideoRenderer* sdl_renderer)
+           SdlVideoRenderer* sdl_renderer,
+           bool reconnect)
       : env_(env), client_(client), sdl_renderer_(sdl_renderer),
-        play_(play), low_latency_(low_latency), output_file_(output_file) {
+        play_(play), low_latency_(low_latency), reconnect_(reconnect),
+        output_file_(output_file) {
     if (!play_) {
       y4m_sink_ = std::make_unique<Y4mVideoSink>(output_file);
     }
@@ -100,6 +104,14 @@ class Receiver : public webrtc::PeerConnectionObserver,
 
   ~Receiver() override { DeletePeerConnection(); }
 
+  bool should_retry() const { return reconnect_ && retry_; }
+  void set_retry_flag() { retry_ = true; }
+
+  void reset_for_retry() {
+    DeletePeerConnection();
+    retry_ = false;
+  }
+
   // PeerConnectionClientObserver implementation.
   void OnSignedIn() override {
     RTC_LOG(LS_INFO) << "Signed in. Waiting for sender to offer...";
@@ -107,8 +119,14 @@ class Receiver : public webrtc::PeerConnectionObserver,
 
   void OnDisconnected() override {
     RTC_LOG(LS_INFO) << "Disconnected from signaling server.";
-    DeletePeerConnection();
-    webrtc::Thread::Current()->Quit();
+    if (reconnect_) {
+      RTC_LOG(LS_INFO) << "Will retry connection in 3 seconds...";
+      retry_ = true;
+      webrtc::Thread::Current()->Quit();
+    } else {
+      DeletePeerConnection();
+      webrtc::Thread::Current()->Quit();
+    }
   }
 
   void OnPeerConnected(int id, const std::string& name) override {
@@ -234,6 +252,10 @@ class Receiver : public webrtc::PeerConnectionObserver,
 
   void OnServerConnectionFailure() override {
     RTC_LOG(LS_ERROR) << "Failed to connect to signaling server.";
+    if (reconnect_) {
+      RTC_LOG(LS_INFO) << "Will retry in 3 seconds...";
+      retry_ = true;
+    }
     webrtc::Thread::Current()->Quit();
   }
 
@@ -380,6 +402,8 @@ class Receiver : public webrtc::PeerConnectionObserver,
   SdlVideoRenderer* sdl_renderer_ = nullptr;  // Not owned, created in main().
   bool play_ = false;
   bool low_latency_ = false;
+  bool reconnect_ = false;
+  bool retry_ = false;
   std::string output_file_;
 };
 
@@ -438,6 +462,8 @@ int main(int argc, char* argv[]) {
     peer_name = GetPeerName();
   }
 
+  bool reconnect = absl::GetFlag(FLAGS_reconnect);
+
   webrtc::InitializeSSL();
 
   HeadlessSocketServer socket_server;
@@ -454,24 +480,35 @@ int main(int argc, char* argv[]) {
     sdl_renderer = sdl_renderer_owner.get();
   }
 
-  PeerConnectionClient client;
-  auto receiver =
-      webrtc::make_ref_counted<Receiver>(env, &client, output_file, play,
-                                         low_latency, sdl_renderer);
-  client.Connect(server, port, peer_name);
+  // Main loop with optional reconnect.
+  while (true) {
+    PeerConnectionClient client;
+    auto receiver =
+        webrtc::make_ref_counted<Receiver>(env, &client, output_file, play,
+                                           low_latency, sdl_renderer, reconnect);
+    client.Connect(server, port, peer_name);
 
-  // Run the message loop, pumping SDL rendering between messages.
-  if (play && sdl_renderer) {
-    SetupSignalHandler();  // This calls Thread::Current()->Quit() on SIGINT.
+    // Run the message loop, pumping SDL rendering between messages.
+    if (play && sdl_renderer) {
+      SetupSignalHandler();
 
-    webrtc::Thread* main_thread = webrtc::Thread::Current();
-    // ProcessMessages returns false when Quit() has been called.
-    while (main_thread->ProcessMessages(16)) {
-      sdl_renderer->RenderPendingFrames();
+      webrtc::Thread* main_thread = webrtc::Thread::Current();
+      while (main_thread->ProcessMessages(16)) {
+        sdl_renderer->RenderPendingFrames();
+      }
+      RTC_LOG(LS_INFO) << "Exited main loop.";
+    } else {
+      thread.Run();
     }
-    RTC_LOG(LS_INFO) << "Exiting main loop.";
-  } else {
-    thread.Run();
+
+    if (!reconnect || !receiver->should_retry()) {
+      break;  // Normal exit or reconnect disabled.
+    }
+
+    RTC_LOG(LS_INFO) << "Reconnecting in 3 seconds...";
+    receiver->reset_for_retry();
+    // Drain socket server events from failed connection.
+    webrtc::Thread::Current()->ProcessMessages(3000);
   }
 
   webrtc::CleanupSSL();

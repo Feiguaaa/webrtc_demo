@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 
 def main():
-    csv_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/frame_loss.csv"
+    csv_path = sys.argv[1] if len(sys.argv) > 1 else "output/frame_loss.csv"
 
     frame_numbers = []
     loss_rates = []

@@ -67,7 +67,6 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ssl_adapter.h"
-#include "rtc_base/physical_socket_server.h"
 #include "rtc_base/strings/json.h"
 #include "rtc_base/thread.h"
 #include "test/frame_generator_capturer.h"
@@ -91,6 +90,9 @@ ABSL_FLAG(double, simulate_loss, 0.0,
 ABSL_FLAG(std::string, periodic_loss, "",
           "Periodic packet loss pattern: '<interval_ms>:<drop_count>'. "
           "E.g., '2000:3' = drop 3 packets every 2 seconds.");
+ABSL_FLAG(std::string, burst_loss, "",
+          "Burst packet loss: '<start_s>:<duration_s>:<loss_pct>'. "
+          "E.g., '15:0.5:0.5' = at 15s, lose 50%% for 0.5s.");
 
 namespace {
 
@@ -486,6 +488,25 @@ int main(int argc, char* argv[]) {
              drop_count, (long long)interval_ms);
     } else {
       printf("Invalid periodic_loss format, expected '<ms>:<count>'\n");
+    }
+  }
+
+  std::string burst = absl::GetFlag(FLAGS_burst_loss);
+  if (!burst.empty()) {
+    size_t p1 = burst.find(':');
+    size_t p2 = burst.find(':', p1 + 1);
+    if (p1 != std::string::npos && p2 != std::string::npos) {
+      double start_s = std::stod(burst.substr(0, p1));
+      double duration_s = std::stod(burst.substr(p1 + 1, p2 - p1 - 1));
+      double loss_pct = std::stod(burst.substr(p2 + 1));
+      webrtc::SetBurstLoss(
+          static_cast<int64_t>(start_s * 1000000),
+          static_cast<int64_t>(duration_s * 1000000),
+          loss_pct);
+      printf("Burst packet loss: at %.1fs, lose %.0f%% for %.3fs\n",
+             start_s, loss_pct * 100, duration_s);
+    } else {
+      printf("Invalid burst_loss format, expected '<start_s>:<duration_s>:<pct>'\n");
     }
   }
 

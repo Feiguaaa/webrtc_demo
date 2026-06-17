@@ -12,6 +12,8 @@
 
 #include <SDL.h>
 #include <signal.h>
+#include <ctime>
+#include <sys/stat.h>
 
 // Initialize NSApplication for macOS GUI.
 #ifdef __APPLE__
@@ -32,7 +34,15 @@
 static constexpr int kVideoClockHz = 90000;
 
 FrameLossTracker::FrameLossTracker() {
-  OpenCsv("/tmp/frame_loss.csv");
+  // Generate timestamp-based filename: output/session_YYYYMMDD_HHMMSS.csv
+  std::time_t t = std::time(nullptr);
+  std::tm* tm = std::localtime(&t);
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "output/session_%04d%02d%02d_%02d%02d%02d.csv",
+                tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                tm->tm_hour, tm->tm_min, tm->tm_sec);
+  mkdir("output", 0755);  // Ensure directory exists.
+  OpenCsv(buf);
 }
 
 FrameLossTracker::FrameLossTracker(const std::string& output_csv) {
@@ -43,7 +53,7 @@ void FrameLossTracker::OpenCsv(const std::string& output_csv) {
   csv_ = fopen(output_csv.c_str(), "w");
   if (csv_) {
     fprintf(csv_, "frame_number,width,height,received_packets,"
-            "skipped_frames,loss_rate,cumulative_loss_rate\n");
+            "skipped_frames,loss_rate,cumulative_loss_rate,bitrate_kbps\n");
   }
 }
 
@@ -164,9 +174,10 @@ void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_info
 
   // Write to CSV.
   if (csv_) {
-    fprintf(csv_, "%d,%d,%d,%d,%d,%.4f,%.4f\n",
+    fprintf(csv_, "%d,%d,%d,%d,%d,%.4f,%.4f,%ld\n",
             frame_count_, width, height, received_pkts,
-            skipped, frame_loss_rate, cumulative_loss_rate);
+            skipped, frame_loss_rate, cumulative_loss_rate,
+            (long)prev_bitrate_kbps_);
   }
 
   // Print summary every 30 frames.
