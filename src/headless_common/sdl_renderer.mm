@@ -54,6 +54,7 @@ void FrameLossTracker::OpenCsv(const std::string& output_csv) {
   if (csv_) {
     fprintf(csv_, "frame_number,width,height,received_packets,"
             "skipped_frames,loss_rate,cumulative_loss_rate,bitrate_kbps\n");
+    fflush(csv_);
   }
 }
 
@@ -178,6 +179,7 @@ void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_info
             frame_count_, width, height, received_pkts,
             skipped, frame_loss_rate, cumulative_loss_rate,
             (long)prev_bitrate_kbps_);
+    fflush(csv_);
   }
 
   // Print summary every 30 frames.

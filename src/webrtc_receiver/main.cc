@@ -114,10 +114,12 @@ class Receiver : public webrtc::PeerConnectionObserver,
 
   // PeerConnectionClientObserver implementation.
   void OnSignedIn() override {
+    fprintf(stderr, "[Receiver] Signed in. Waiting for sender to offer...\n");
     RTC_LOG(LS_INFO) << "Signed in. Waiting for sender to offer...";
   }
 
   void OnDisconnected() override {
+    fprintf(stderr, "[Receiver] Disconnected from signaling server.\n");
     RTC_LOG(LS_INFO) << "Disconnected from signaling server.";
     if (reconnect_) {
       RTC_LOG(LS_INFO) << "Will retry connection in 3 seconds...";
@@ -130,10 +132,12 @@ class Receiver : public webrtc::PeerConnectionObserver,
   }
 
   void OnPeerConnected(int id, const std::string& name) override {
+    fprintf(stderr, "[Receiver] Peer connected: %s (id=%d)\n", name.c_str(), id);
     RTC_LOG(LS_INFO) << "Peer connected: " << name << " (id=" << id << ")";
   }
 
   void OnPeerDisconnected(int id) override {
+    fprintf(stderr, "[Receiver] Peer disconnected: %d\n", id);
     RTC_LOG(LS_INFO) << "Peer disconnected: " << id;
     if (id == peer_id_) {
       DeletePeerConnection();
@@ -142,6 +146,7 @@ class Receiver : public webrtc::PeerConnectionObserver,
   }
 
   void OnMessageFromPeer(int peer_id, const std::string& message) override {
+    fprintf(stderr, "[Receiver] Message from peer %d (len=%zu)\n", peer_id, message.size());
     RTC_DCHECK(!message.empty());
 
     if (!peer_connection_) {

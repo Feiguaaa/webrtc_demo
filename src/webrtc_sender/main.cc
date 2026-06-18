@@ -9,6 +9,7 @@
  */
 
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -176,34 +177,67 @@ class Sender : public webrtc::PeerConnectionObserver,
   ~Sender() override { DeletePeerConnection(); }
 
   // PeerConnectionClientObserver implementation.
+  void OnPeerConnected(int id, const std::string& name) override {
+    fprintf(stderr, "[Sender] Peer connected: %s (id=%d)\n", name.c_str(), id);
+    RTC_LOG(LS_INFO) << "Peer connected: " << name << " (id=" << id << ")";
+    // Track all peers that look like receivers (name starts with "rx_").
+    if (name.rfind("rx_", 0) == 0) {
+      // Always pick the newest receiver (highest ID) to avoid stale peers.
+      if (peer_id_ == -1 || id > peer_id_) {
+        peer_id_ = id;
+        RTC_LOG(LS_INFO) << "Selected receiver: " << name << " (id=" << id << ")";
+      }
+      candidate_peers_[id] = name;
+      // If already signed in, start the call immediately to the newest receiver.
+      if (peer_connection_) {
+        // Already in a call, but a newer receiver appeared. Restart.
+        RTC_LOG(LS_INFO) << "Newer receiver appeared, restarting call.";
+        DeletePeerConnection();
+        StartCall();
+      }
+    }
+  }
+
   void OnSignedIn() override {
+    fprintf(stderr, "[Sender] Signed in. Waiting for receiver to connect...\n");
     RTC_LOG(LS_INFO) << "Signed in. Waiting for receiver to connect...";
+    // If we already have a receiver candidate from the sign-in response, start the call.
+    if (peer_id_ != -1) {
+      RTC_LOG(LS_INFO) << "Starting call to receiver id=" << peer_id_;
+      StartCall();
+    }
   }
 
   void OnDisconnected() override {
+    fprintf(stderr, "[Sender] Disconnected from signaling server.\n");
     RTC_LOG(LS_INFO) << "Disconnected from signaling server.";
     DeletePeerConnection();
     webrtc::Thread::Current()->Quit();
   }
 
-  void OnPeerConnected(int id, const std::string& name) override {
-    RTC_LOG(LS_INFO) << "Peer connected: " << name << " (id=" << id << ")";
-    if (peer_id_ == -1) {
-      peer_id_ = id;
-      StartCall();
-    }
-  }
-
   void OnPeerDisconnected(int id) override {
+    fprintf(stderr, "[Sender] Peer disconnected: %d\n", id);
     RTC_LOG(LS_INFO) << "Peer disconnected: " << id;
     if (id == peer_id_) {
-      RTC_LOG(LS_INFO) << "Our peer disconnected. Exiting.";
+      RTC_LOG(LS_INFO) << "Our peer disconnected. Trying next candidate.";
+      peer_id_ = -1;
       DeletePeerConnection();
-      webrtc::Thread::Current()->Quit();
+      // Try to connect to the next available receiver candidate.
+      if (!candidate_peers_.empty()) {
+        auto it = candidate_peers_.begin();
+        peer_id_ = it->first;
+        RTC_LOG(LS_INFO) << "Connecting to candidate receiver: " << it->second;
+        StartCall();
+        candidate_peers_.erase(it);
+      }
+    } else {
+      // Remove from candidates if present.
+      candidate_peers_.erase(id);
     }
   }
 
   void OnMessageFromPeer(int peer_id, const std::string& message) override {
+    fprintf(stderr, "[Sender] Message from peer %d (len=%zu)\n", peer_id, message.size());
     RTC_DCHECK(peer_id_ == peer_id || peer_id_ == -1);
     RTC_DCHECK(!message.empty());
 
@@ -402,6 +436,7 @@ class Sender : public webrtc::PeerConnectionObserver,
   }
 
   int peer_id_ = -1;
+  std::map<int, std::string> candidate_peers_;
   const webrtc::Environment& env_;
   PeerConnectionClient* client_;
   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
