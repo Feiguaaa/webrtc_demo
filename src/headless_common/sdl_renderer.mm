@@ -12,6 +12,7 @@
 
 #include <SDL.h>
 #include <signal.h>
+#include <algorithm>
 #include <ctime>
 #include <sys/stat.h>
 
@@ -26,22 +27,14 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-// WebRTC video uses 90kHz RTP timestamps. A 30fps stream has
-// RTP delta = 3000 per frame. When UDP packets are dropped and
-// NACK is disabled, the frame becomes undecodable and is skipped.
-// We detect skipped frames by comparing actual RTP delta to the
-// expected per-frame interval.
-static constexpr int kVideoClockHz = 90000;
-
 FrameLossTracker::FrameLossTracker() {
-  // Generate timestamp-based filename: output/session_YYYYMMDD_HHMMSS.csv
   std::time_t t = std::time(nullptr);
   std::tm* tm = std::localtime(&t);
   char buf[64];
   std::snprintf(buf, sizeof(buf), "output/session_%04d%02d%02d_%02d%02d%02d.csv",
                 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
                 tm->tm_hour, tm->tm_min, tm->tm_sec);
-  mkdir("output", 0755);  // Ensure directory exists.
+  mkdir("output", 0755);
   OpenCsv(buf);
 }
 
@@ -53,7 +46,7 @@ void FrameLossTracker::OpenCsv(const std::string& output_csv) {
   csv_ = fopen(output_csv.c_str(), "w");
   if (csv_) {
     fprintf(csv_, "frame_number,width,height,received_packets,"
-            "skipped_frames,loss_rate,cumulative_loss_rate,bitrate_kbps\n");
+            "lost_packets,loss_rate,cumulative_loss_rate,bitrate_kbps\n");
     fflush(csv_);
   }
 }
@@ -62,11 +55,6 @@ FrameLossTracker::~FrameLossTracker() {
   if (csv_) {
     fclose(csv_);
   }
-}
-
-int FrameLossTracker::EstimateInterval(uint32_t delta) {
-  if (delta == 0 || delta > 50000) return 0;
-  return static_cast<int>(delta);
 }
 
 void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_infos,
@@ -86,78 +74,109 @@ void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_info
   }
 
   int received_pkts = static_cast<int>(packet_infos.size());
-  int skipped = 0;
+  int64_t lost_this_frame = 0;
 
   if (frame_count_ == 1) {
     prev_rtp_timestamp_ = rtp_timestamp;
     prev_width_ = width;
     prev_height_ = height;
-    // First frame: always received.
-    total_received_ = 1;
-    total_expected_ = 1;
+    // Seed EMA for per-frame packet count.
+    avg_packets_per_frame_ = static_cast<double>(received_pkts);
+    total_received_ = received_pkts;
+    total_expected_ = received_pkts;
     // Seed bitrate window.
     bitrate_window_bytes_ = 0;
+    // Seed EMA bitrate baseline.
+    for (const auto& pkt_info : packet_infos) {
+      if (pkt_info.encoder_target_bitrate_kbps()) {
+        prev_bitrate_for_ema_ = *pkt_info.encoder_target_bitrate_kbps();
+        ema_baseline_set_ = true;
+        break;
+      }
+    }
   } else {
-    // RTP timestamp delta.
+    // Try to read exact encoder bitrate from RTP header extension.
+    // This is needed BEFORE loss detection to handle bitrate changes.
+    int64_t exact_bitrate_kbps = 0;
+    for (const auto& pkt_info : packet_infos) {
+      if (pkt_info.encoder_target_bitrate_kbps()) {
+        exact_bitrate_kbps = *pkt_info.encoder_target_bitrate_kbps();
+        break;
+      }
+    }
+
+    // Update bitrate tracking.
+    int64_t current_bitrate = exact_bitrate_kbps > 0 ? exact_bitrate_kbps : prev_bitrate_kbps_;
+    if (!ema_baseline_set_ && current_bitrate > 0) {
+      ema_baseline_set_ = true;
+      prev_bitrate_for_ema_ = current_bitrate;
+    }
+
+    // Detect significant bitrate changes and reset EMA baseline.
+    // When the sender's GoogCC reduces bitrate (e.g., after burst loss),
+    // it sends fewer packets per frame — this is NOT packet loss, just
+    // rate adaptation. Resetting the EMA prevents false loss detection.
+    bool baseline_reset = false;
+    if (ema_baseline_set_ && current_bitrate > 0 && prev_bitrate_for_ema_ > 0) {
+      double bitrate_ratio = static_cast<double>(current_bitrate) / prev_bitrate_for_ema_;
+      if (bitrate_ratio < 0.7 || bitrate_ratio > 1.3) {
+        // Bitrate changed by >30%: reset EMA to current packet count.
+        avg_packets_per_frame_ = static_cast<double>(received_pkts);
+        prev_bitrate_for_ema_ = current_bitrate;
+        baseline_reset = true;
+      }
+    }
+
+    // Detect loss using EMA-based packet count tracking.
+    // Skipped on baseline reset frames — those are rate adaptation, not loss.
+    // We can't use sequence number gaps because the sender's pacer sends
+    // padding/probe packets that consume sequence numbers but don't appear
+    // in frame.packet_infos(). Instead, we detect sudden drops in received
+    // packet count compared to the rolling average.
+    if (!baseline_reset) {
+      double deficit = avg_packets_per_frame_ - static_cast<double>(received_pkts);
+      if (deficit > avg_packets_per_frame_ * 0.35) {
+        // More than 35% below average → count deficit as lost packets.
+        lost_this_frame = static_cast<int64_t>(deficit + 0.5);
+      }
+
+      total_expected_ += received_pkts + lost_this_frame;
+      total_received_ += received_pkts;
+      cumulative_lost_ += lost_this_frame;
+    } else {
+      total_expected_ += received_pkts;
+      total_received_ += received_pkts;
+    }
+
+    // Update EMA: exponential moving average of packets per frame.
+    constexpr double kAlpha = 0.15;
+    avg_packets_per_frame_ = kAlpha * static_cast<double>(received_pkts) +
+                             (1.0 - kAlpha) * avg_packets_per_frame_;
+
+    // RTP timestamp delta (kept for bitrate time calculation).
     uint32_t delta = rtp_timestamp - prev_rtp_timestamp_;
+    int64_t frame_time_us = static_cast<int64_t>(delta) * 1000000LL / 90000LL;
 
-    // Bitrate calculation.
-    int64_t frame_time_us = static_cast<int64_t>(delta) * 1000000LL / kVideoClockHz;
-    int i420_size = width * height + 2 * ((width + 1) / 2) * ((height + 1) / 2);
-    bitrate_window_bytes_ += i420_size;
-    bitrate_window_time_us_ += frame_time_us;
-    bitrate_window_frames_++;
+    if (exact_bitrate_kbps > 0) {
+      prev_bitrate_kbps_ = exact_bitrate_kbps;
+    } else {
+      // Fallback: estimate from RTP packet count × MTU.
+      static constexpr int kRtpPacketPayloadBytes = 1200;
+      bitrate_window_bytes_ += received_pkts * kRtpPacketPayloadBytes;
+      bitrate_window_time_us_ += frame_time_us;
+      bitrate_window_frames_++;
+      bitrate_window_packets_ += received_pkts;
 
-    if (bitrate_window_frames_ >= 30) {
-      if (bitrate_window_time_us_ > 0) {
-        prev_bitrate_kbps_ = bitrate_window_bytes_ * 8000LL / bitrate_window_time_us_;
-      }
-      bitrate_window_bytes_ = 0;
-      bitrate_window_time_us_ = 0;
-      bitrate_window_frames_ = 0;
-    }
-
-    // Detect expected interval from first valid deltas.
-    if (delta > 0 && delta < 10000) {
-      if (interval_samples_ == 0) {
-        expected_interval_ = static_cast<int>(delta);
-        interval_samples_ = 1;
-      } else if (interval_samples_ < 10) {
-        // Early: heavily weight new samples.
-        expected_interval_ =
-            static_cast<int>(0.3 * expected_interval_ + 0.7 * delta);
-        interval_samples_++;
-      } else {
-        // Stable: slow adaptation.
-        expected_interval_ =
-            static_cast<int>(0.95 * expected_interval_ + 0.05 * delta);
-        interval_samples_++;
-      }
-      if (interval_samples_ == 5) {
-        fprintf(stderr,
-                "[LossTracker] Expected RTP interval: %d (~%.1f fps)\n",
-                expected_interval_,
-                kVideoClockHz * 1.0 / expected_interval_);
+      if (bitrate_window_frames_ >= 30) {
+        if (bitrate_window_time_us_ > 0) {
+          prev_bitrate_kbps_ = bitrate_window_bytes_ * 8000LL / bitrate_window_time_us_;
+        }
+        bitrate_window_bytes_ = 0;
+        bitrate_window_time_us_ = 0;
+        bitrate_window_frames_ = 0;
+        bitrate_window_packets_ = 0;
       }
     }
-
-    // Detect skipped frames via RTP timestamp gap.
-    // A delta of 2x expected_interval means 1 frame was lost.
-    // A delta of 3x means 2 frames were lost, etc.
-    if (expected_interval_ > 0 && delta > 0) {
-      // Calculate how many frames this delta represents.
-      // Round to nearest: (delta + interval/2) / interval.
-      int frames_represented = (delta + expected_interval_ / 2) / expected_interval_;
-
-      // Allow some tolerance: if delta is within 50% of expected, it's 1 frame.
-      if (frames_represented > 1) {
-        skipped = frames_represented - 1;
-      }
-    }
-
-    total_expected_ += 1 + skipped;
-    total_received_ += 1;
-    cumulative_lost_ += skipped;
   }
 
   // Per-frame loss rate (instantaneous and cumulative).
@@ -167,17 +186,16 @@ void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_info
     cumulative_loss_rate =
         static_cast<double>(cumulative_lost_) / total_expected_;
   }
-  // Instantaneous: frames lost / frames expected for this observation.
-  if (skipped > 0) {
+  if (lost_this_frame > 0 && (received_pkts + lost_this_frame) > 0) {
     frame_loss_rate =
-        static_cast<double>(skipped) / (1 + skipped);
+        static_cast<double>(lost_this_frame) / (received_pkts + lost_this_frame);
   }
 
   // Write to CSV.
   if (csv_) {
-    fprintf(csv_, "%d,%d,%d,%d,%d,%.4f,%.4f,%ld\n",
+    fprintf(csv_, "%d,%d,%d,%d,%ld,%.4f,%.4f,%ld\n",
             frame_count_, width, height, received_pkts,
-            skipped, frame_loss_rate, cumulative_loss_rate,
+            (long)lost_this_frame, frame_loss_rate, cumulative_loss_rate,
             (long)prev_bitrate_kbps_);
     fflush(csv_);
   }
@@ -187,10 +205,11 @@ void FrameLossTracker::OnFrameReceived(const webrtc::RtpPacketInfos& packet_info
     fprintf(stderr,
             "[LossTracker] Frame #%d | %dx%d | "
             "pkts=%d | fps=%d | bitrate=%ld kbps | "
-            "expected=%d recv=%d lost=%d cum_loss=%.1f%%\n",
+            "expected=%lld recv=%lld lost=%lld cum_loss=%.1f%%\n",
             frame_count_, width, height, received_pkts,
             prev_fps_, (long)prev_bitrate_kbps_,
-            total_expected_, total_received_, cumulative_lost_,
+            (long long)total_expected_, (long long)total_received_,
+            (long long)cumulative_lost_,
             cumulative_loss_rate * 100);
   }
 

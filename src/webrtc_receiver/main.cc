@@ -55,6 +55,7 @@
 #include "examples/peerconnection/client/flag_defs.h"
 #include "examples/peerconnection/client/peer_connection_client.h"
 #include "examples/peerconnection/headless_common/headless_socket_server.h"
+#include "examples/peerconnection/headless_common/per_frame_loss_tracker.h"
 #include "examples/peerconnection/headless_common/receiver_sink.h"
 #include "examples/peerconnection/headless_common/sdl_renderer.h"
 #include "examples/peerconnection/headless_common/signaling_helper.h"
@@ -485,6 +486,11 @@ int main(int argc, char* argv[]) {
     sdl_renderer = sdl_renderer_owner.get();
   }
 
+  // Create per-frame loss tracker at RTP layer.
+  auto per_frame_loss_tracker = std::make_unique<PerFrameLossTracker>(nullptr);
+  g_per_frame_loss_tracker.store(per_frame_loss_tracker.get(),
+                                  std::memory_order_relaxed);
+
   // Main loop with optional reconnect.
   while (true) {
     PeerConnectionClient client;
@@ -515,6 +521,10 @@ int main(int argc, char* argv[]) {
     // Drain socket server events from failed connection.
     webrtc::Thread::Current()->ProcessMessages(3000);
   }
+
+  // Clean up global pointer before tracker is destroyed.
+  g_per_frame_loss_tracker.store(nullptr, std::memory_order_relaxed);
+  per_frame_loss_tracker.reset();
 
   webrtc::CleanupSSL();
   return 0;

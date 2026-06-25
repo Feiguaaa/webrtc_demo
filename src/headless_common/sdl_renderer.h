@@ -27,18 +27,17 @@ struct FrameData {
   int height = 0;
 };
 
-// Tracks frame loss by detecting RTP timestamp gaps.
-// When packets are dropped and NACK is disabled, frames become
-// undecodable and are skipped. This tracker detects skipped frames
-// via RTP timestamp delta analysis.
+// Tracks packet loss by comparing RTP sequence numbers across frames.
+// Expected packets = seq gap between consecutive frames.
+// Lost packets = expected - received.
 class FrameLossTracker {
  public:
   FrameLossTracker();
   explicit FrameLossTracker(const std::string& output_csv);
   ~FrameLossTracker();
 
-  // Call for every received frame. Detects skipped frames by
-  // comparing RTP timestamp delta against expected interval.
+  // Call for every received frame. Detects packet loss by
+  // comparing RTP sequence number gaps between consecutive frames.
   void OnFrameReceived(const webrtc::RtpPacketInfos& packet_infos,
                        uint32_t rtp_timestamp, int width, int height,
                        int64_t time_us);
@@ -46,22 +45,22 @@ class FrameLossTracker {
  private:
   void OpenCsv(const std::string& output_csv);
 
-  // Estimate expected RTP interval from first few frames.
-  int EstimateInterval(uint32_t delta);
-
   int frame_count_ = 0;
   uint32_t prev_rtp_timestamp_ = 0;
   int prev_width_ = 0;
   int prev_height_ = 0;
 
-  // Expected RTP interval (detected from first frames).
-  int expected_interval_ = 0;
-  int interval_samples_ = 0;
+  // Rolling count of expected vs received packets.
+  int64_t total_expected_ = 0;
+  int64_t total_received_ = 0;
+  int64_t cumulative_lost_ = 0;
 
-  // Rolling count of expected vs received frames.
-  int total_expected_ = 0;
-  int total_received_ = 0;
-  int cumulative_lost_ = 0;
+  // EMA-based per-frame packet count tracking.
+  double avg_packets_per_frame_ = 0.0;
+
+  // Bitrate baseline for EMA (prevents false loss after bitrate changes).
+  int64_t prev_bitrate_for_ema_ = 0;
+  bool ema_baseline_set_ = false;
 
   // Per-second frame counter.
   int64_t second_start_us_ = 0;
@@ -72,6 +71,7 @@ class FrameLossTracker {
   int64_t bitrate_window_bytes_ = 0;
   int64_t bitrate_window_time_us_ = 0;
   int bitrate_window_frames_ = 0;
+  int bitrate_window_packets_ = 0;
   int64_t prev_bitrate_kbps_ = 0;
 
   // CSV output for plotting.

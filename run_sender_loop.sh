@@ -7,6 +7,7 @@ SERVER=""
 PORT=""
 VIDEO_DIR=""
 RECEIVER_CMD=""
+BURST_LOSS=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -14,6 +15,7 @@ for arg in "$@"; do
     --port=*) PORT="${arg#*=}" ;;
     --video_dir=*) VIDEO_DIR="${arg#*=}" ;;
     --receiver_cmd=*) RECEIVER_CMD="${arg#*=}" ;;
+    --burst_loss=*) BURST_LOSS="${arg#*=}" ;;
   esac
 done
 
@@ -35,11 +37,12 @@ launch_receiver() {
   if [ -n "$RECEIVER_CMD" ]; then
     local name="rx_$(date +%s%N)"
     echo ">>> Launching receiver (name=$name)..."
-    eval $RECEIVER_CMD --name="$name" &
+    echo ">>> RECEIVER_CMD=$RECEIVER_CMD"
+    $RECEIVER_CMD --name="$name" --low_latency &
     RECEIVER_PID=$!
     echo ">>> Receiver PID=$RECEIVER_PID"
     # Wait for signaling connection.
-    sleep 8
+    sleep 3
     if ! kill -0 "$RECEIVER_PID" 2>/dev/null; then
       echo ">>> ERROR: Receiver died on startup!"
       RECEIVER_PID=""
@@ -102,10 +105,14 @@ for i in "${!videos[@]}"; do
   fi
 
   # Run sender with timeout (kills cleanly after N seconds).
-  $SENDER --server="$SERVER" --port="$PORT" --video_file="$video" > /tmp/sender_log_$i.txt 2>&1 &
+  sender_args=("$SENDER" "--server=$SERVER" "--port=$PORT" "--video_file=$video" "--max_bitrate=0")
+  if [ -n "$BURST_LOSS" ]; then
+    sender_args+=("--burst_loss=$BURST_LOSS")
+  fi
+  "${sender_args[@]}" > /tmp/sender_log_$i.txt 2>&1 &
   SENDER_PID=$!
   echo ">>> Sender PID=$SENDER_PID"
-  (sleep 25 && kill $SENDER_PID 2>/dev/null) &
+  (sleep 30 && kill $SENDER_PID 2>/dev/null) &
   KILLER_PID=$!
   wait $SENDER_PID 2>/dev/null || true
   kill $KILLER_PID 2>/dev/null || true

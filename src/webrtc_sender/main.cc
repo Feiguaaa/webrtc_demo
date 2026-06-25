@@ -416,7 +416,19 @@ class Sender : public webrtc::PeerConnectionObserver,
         RTC_LOG(LS_ERROR) << "Failed to add video track: "
                           << result.error().message();
       } else {
-        RTC_LOG(LS_INFO) << "Video track added.";
+        // Prevent resolution changes so we can observe pure bitrate recovery.
+        auto senders = peer_connection_->GetSenders();
+        for (const auto& sender : senders) {
+          if (sender->track() &&
+              sender->track()->kind() ==
+                  webrtc::MediaStreamTrackInterface::kVideoKind) {
+            auto params = sender->GetParameters();
+            params.degradation_preference =
+                webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+            sender->SetParameters(params);
+          }
+        }
+        RTC_LOG(LS_INFO) << "Video track added with MAINTAIN_RESOLUTION.";
       }
     } else {
       RTC_LOG(LS_WARNING) << "No video source available.";
@@ -469,6 +481,12 @@ int main(int argc, char* argv[]) {
 
   // Build field trials string, appending low-latency trials if requested.
   std::string field_trials = absl::GetFlag(FLAGS_force_fieldtrials);
+  // Tune v2 loss-based BWE to be more aggressive on loss.
+  if (!field_trials.empty())
+    field_trials += " ";
+  // Use default WebRTC bitrate control (no custom field trials).
+  // Loss-based BWE v2 is disabled by default; legacy BWE handles packet loss.
+  fprintf(stderr, "[MainTest] Sender started, field_trials=%s\n", field_trials.c_str());
   if (absl::GetFlag(FLAGS_low_latency)) {
     if (!field_trials.empty())
       field_trials += " ";
