@@ -108,10 +108,6 @@ void Y4mVideoSink::OnFrame(const webrtc::VideoFrame& frame) {
   int uv_width = (width + 1) / 2;
   int uv_height = (height + 1) / 2;
 
-  // Track per-frame packet loss from sequence numbers.
-  loss_tracker_.OnFrameReceived(frame.packet_infos(), frame.rtp_timestamp(),
-                                width, height, frame.timestamp_us());
-
   if (!header_written_) {
     // Estimate fps from frame timestamp. WebRTC uses microseconds.
     int fps_num = 30;
