@@ -171,3 +171,65 @@ Receiver 端前 3 个包会打印：
 ```
 
 看到 `First extension parsed` 即成功，CSV 写入 `output/rtp_session_*.csv`。
+
+---
+
+## Linux/Windows 平台适配说明
+
+### 与原设计的差异
+
+原设计基于 macOS (New WebRTC API, `std::span`, `RtpHeaderExtensionId` 强类型)，Linux 平台的 WebRTC 版本较旧，以下为适配修改：
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `modules/rtp_rtcp/source/rtp_video_header.h` | 定义 `FramePacketInfo` 和 `EncoderTargetBitrate` 结构体 |
+| `api/rtp_parameters.h` | 定义 `kFramePacketInfoUri` / `kEncoderTargetBitrateUri` URI 常量 |
+| `api/rtp_header_extension_id.h` | （未使用）旧版不支持 `RtpHeaderExtensionId` 强类型，改用 `int` |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `modules/rtp_rtcp/include/rtp_rtcp_defines.h` | 添加 `kRtpExtensionEncoderTargetBitrate` / `kRtpExtensionFramePacketInfo` 枚举值 |
+| `modules/rtp_rtcp/source/rtp_header_extensions.h` | 添加 `EncoderTargetBitrateExtension`(2B) + `FramePacketInfoExtension`(4B) 序列化类 |
+| `modules/rtp_rtcp/source/rtp_header_extension_map.cc` | 注册两个新扩展到 `kExtensions` 数组 |
+| `modules/rtp_rtcp/source/rtp_sender_video.cc` | 每包 `SetExtension<FramePacketInfoExtension>` + 首包 `SetExtension<EncoderTargetBitrateExtension>` |
+| `modules/rtp_rtcp/source/rtp_sender_video.h` | 成员变量 `frame_sequence_counter_` (10-bit, 1024 回绕) |
+| `media/engine/webrtc_video_engine.cc` | `GetRtpHeaderExtensions()` 中注册 URI → SDP `extmap:4` / `extmap:5` |
+| `api/rtp_parameters.h` | 添加 URI 常量、修改 `preferred_id` 为 `std::optional<int>` 兼容旧版 |
+
+### 扩展对照表
+
+| 扩展 | SDP ID | URI | 数据长度 | 写入时机 | 值类型 |
+|------|--------|-----|----------|----------|--------|
+| `FramePacketInfoExtension` | 5 | `.../frame_packet_info` | 4 bytes | 每帧的每个包 | `FramePacketInfo` |
+| `EncoderTargetBitrateExtension` | 4 | `.../encoder_target_bitrate` | 2 bytes | 仅首包 | `EncoderTargetBitrate` |
+
+### 完整字节布局
+
+#### FramePacketInfoExtension (ID=5, 4 bytes)
+
+```
+Byte 0: total_packets[9:2]         → (total_packets >> 2) & 0xFF
+Byte 1: (total_packets & 0x3F) << 2 | (packet_index >> 4)
+Byte 2: frame_sequence[9:2]        → (frame_sequence >> 2) & 0xFF
+Byte 3: (frame_sequence & 0x3F) << 2
+```
+
+#### EncoderTargetBitrateExtension (ID=4, 2 bytes)
+
+```
+Byte 0-1: target_bitrate_kbps      → uint16_t big-endian
+```
+
+### API 差异说明
+
+| 原设计 (macOS) | Linux/Windows 适配 | 原因 |
+|----------------|-------------------|------|
+| `std::span<const uint8_t>` | `ArrayView<const uint8_t>` | 旧版 WebRTC 无 `std::span` |
+| `RtpHeaderExtensionId` 强类型 | `int` | 旧版无此类型 |
+| `#include <span>` | `#include "api/array_view.h"` | 对应头文件差异 |
+| `EncoderTargetBitrate bitrate.bitrate_kbps` | 同左，使用 struct | 保持设计一致 |
+| `RtpExtension::kMinId` 为 `RtpHeaderExtensionId` | `constexpr int kMinId = 1` | C++17 不允许同一类型的 `static constexpr` 成员 |
