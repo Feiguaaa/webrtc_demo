@@ -803,7 +803,58 @@ void RtpVideoStreamReceiver2::OnRtpPacket(const RtpPacketReceived& packet) {
   // (packet_index == 0), since the value is constant within a frame.
   if (PerFrameLossTracker* tracker = g_per_frame_loss_tracker.load(std::memory_order_relaxed)) {
     FramePacketInfo frame_info;
-    if (packet.GetExtension<FramePacketInfoExtension>(&frame_info)) {
+    bool found = packet.GetExtension<FramePacketInfoExtension>(&frame_info);
+
+    if (!found) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+      const auto* data = packet.data();
+      size_t len = packet.size();
+      size_t header_len = 12 + 4 * packet.Csrcs().size();
+      static int dump_count = 0;
+      if (dump_count < 20 && len > header_len + 4 && data[header_len] == 0xBE && data[header_len + 1] == 0xDE) {
+        int num_exts = (data[header_len + 2] << 8) | data[header_len + 3];
+        size_t ext_end = header_len + 4 + num_exts * 4;
+        if (ext_end > len) ext_end = len;
+        fprintf(stderr, "[RtpHex] seq=%u RTP header (%zu bytes):\n", packet.SequenceNumber(), ext_end);
+        for (size_t i = 0; i < ext_end; i++) {
+          fprintf(stderr, "%02x ", data[i]);
+          if ((i + 1) % 16 == 0) fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "\n");
+        dump_count++;
+      }
+
+      // Also try raw parsing with sender-side formula
+      if (!found && len > header_len + 4 && data[header_len] == 0xBE && data[header_len + 1] == 0xDE) {
+        int num_exts = (data[header_len + 2] << 8) | data[header_len + 3];
+        size_t pos = header_len + 4;
+        for (int i = 0; i < num_exts && pos + 1 < len; i++) {
+          uint8_t id = (data[pos] >> 4) & 0x0F;
+          (void)id;
+          uint8_t elen = (data[pos] & 0x0F) + 1;
+          pos++;
+          if (elen == 4) {
+            uint32_t raw = ((uint32_t)data[pos] << 24) | ((uint32_t)data[pos+1] << 16) |
+                           ((uint32_t)data[pos+2] << 8) | (uint32_t)data[pos+3];
+            uint16_t total = (((raw >> 24) & 0xFF) << 2) | ((raw >> 18) & 0x03);
+            uint16_t idx = ((raw >> 16) & 0x03) << 4;
+            uint16_t seq = (((raw >> 8) & 0xFF) << 2) | ((raw >> 2) & 0x03);
+            if (total >= 1 && total <= 200 && idx < total) {
+              frame_info.total_packets = total;
+              frame_info.packet_index = idx;
+              frame_info.frame_sequence = seq;
+              found = true;
+              break;
+            }
+          }
+          pos += elen;
+        }
+      }
+#pragma clang diagnostic pop
+    }
+
+    if (found) {
       tracker->OnRtpPacket(
           frame_info.frame_sequence, frame_info.packet_index,
           frame_info.total_packets,

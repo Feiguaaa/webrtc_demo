@@ -422,9 +422,14 @@ class FramePacketInfoExtension {
   static bool Parse(std::span<const uint8_t> data, FramePacketInfo* info) {
     if (data.size() < kValueSizeBytes) return false;
     uint32_t raw = ByteReader<uint32_t>::ReadBigEndian(data.data());
-    info->total_packets = (raw >> 22) & 0x3FF;    // Bits 22-31: 10 bits.
-    info->packet_index = (raw >> 16) & 0x3F;      // Bits 16-21: 6 bits.
-    info->frame_sequence = raw & 0x3FF;            // Bits 0-9: 10 bits, wraps at 1024.
+    // Match sender-side byte layout:
+    // Byte 0: total_packets[9:2]
+    // Byte 1: (total_packets & 0x3F) << 2 | (packet_index >> 4)
+    // Byte 2: frame_sequence[9:2]
+    // Byte 3: (frame_sequence & 0x3F) << 2
+    info->total_packets = (((raw >> 24) & 0xFF) << 2) | ((raw >> 18) & 0x03);
+    info->packet_index = ((raw >> 16) & 0x03) << 4;
+    info->frame_sequence = (((raw >> 8) & 0xFF) << 2) | ((raw >> 2) & 0x03);
     return true;
   }
   static size_t ValueSize(FramePacketInfo /* info */) {
@@ -435,9 +440,13 @@ class FramePacketInfoExtension {
     RTC_DCHECK_LE(info.total_packets, 1023);
     RTC_DCHECK_LT(info.packet_index, 64);
     RTC_DCHECK_LE(info.frame_sequence, 1023);
-    uint32_t raw = ((uint32_t)info.total_packets << 22) |
-                   ((uint32_t)info.packet_index << 16) |
-                   (uint32_t)info.frame_sequence;
+    // Match sender-side byte layout:
+    uint32_t raw =
+        (static_cast<uint32_t>((info.total_packets >> 2) & 0xFF) << 24) |
+        (static_cast<uint32_t>(((info.total_packets & 0x3F) << 2) |
+                                ((info.packet_index >> 4) & 0x03)) << 16) |
+        (static_cast<uint32_t>((info.frame_sequence >> 2) & 0xFF) << 8) |
+        (static_cast<uint32_t>((info.frame_sequence & 0x3F) << 2));
     ByteWriter<uint32_t>::WriteBigEndian(data.data(), raw);
     return true;
   }
