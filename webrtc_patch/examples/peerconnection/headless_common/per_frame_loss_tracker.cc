@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <ctime>
 #include <map>
-#include <string>
 #include <sys/stat.h>
 
 PerFrameLossTracker::PerFrameLossTracker(PerFrameLossObserver* observer)
@@ -23,7 +22,7 @@ PerFrameLossTracker::PerFrameLossTracker(PerFrameLossObserver* observer)
   csv_ = fopen(buf, "w");
   if (csv_) {
     fprintf(csv_, "frame_seq,frame_number,total_packets,received_packets,"
-            "lost_packets,loss_rate,timestamp_us,target_bitrate_kbps\n");
+            "lost_packets,loss_rate,timestamp_us\n");
     fflush(csv_);
   }
 }
@@ -40,23 +39,19 @@ PerFrameLossTracker::~PerFrameLossTracker() {
 }
 
 void PerFrameLossTracker::OnRtpPacket(uint16_t frame_seq, uint16_t packet_index,
-                                       uint16_t total_packets, int64_t timestamp_us,
-                                       uint16_t target_bitrate_kbps) {
+                                       uint16_t total_packets, int64_t timestamp_us) {
   auto it = frames_.find(frame_seq);
   if (it == frames_.end()) {
-    // New frame: emit all older frames first.
     for (auto& [seq, state] : frames_) {
       if (seq < frame_seq) {
         EmitFrame(state);
       }
     }
-    // Remove emitted frames.
     auto next = frames_.begin();
     while (next != frames_.end() && next->first < frame_seq) {
       next = frames_.erase(next);
     }
 
-    // Create new frame state.
     FrameState new_state;
     new_state.frame_seq = frame_seq;
     new_state.total_packets = total_packets;
@@ -64,17 +59,15 @@ void PerFrameLossTracker::OnRtpPacket(uint16_t frame_seq, uint16_t packet_index,
     new_state.received_count = 1;
     new_state.first_timestamp_us = timestamp_us;
     new_state.seen_total = (total_packets > 0);
-    new_state.target_bitrate_kbps = target_bitrate_kbps;
     if (packet_index < 32) {
       new_state.seen_indices = (1u << packet_index);
     }
     frames_[frame_seq] = new_state;
   } else {
-    // Existing frame: deduplicate by packet_index.
     auto& state = it->second;
     if (packet_index < 32) {
       uint32_t bit = 1u << packet_index;
-      if (state.seen_indices & bit) return;  // duplicate
+      if (state.seen_indices & bit) return;
       state.seen_indices |= bit;
     }
     state.received_count++;
@@ -104,15 +97,13 @@ void PerFrameLossTracker::EmitFrame(const FrameState& state) {
 
   if (observer_) {
     observer_->OnFrameComplete(state.frame_seq, total, received,
-                               state.first_timestamp_us,
-                               state.target_bitrate_kbps);
+                               state.first_timestamp_us);
   }
 
   if (csv_) {
-    fprintf(csv_, "%u,%d,%u,%u,%u,%.4f,%lld,%u\n",
+    fprintf(csv_, "%u,%d,%u,%u,%u,%.4f,%lld\n",
             state.frame_seq, frame_count_, total, received, lost,
-            loss_rate, (long long)state.first_timestamp_us,
-            state.target_bitrate_kbps);
+            loss_rate, (long long)state.first_timestamp_us);
     fflush(csv_);
   }
 

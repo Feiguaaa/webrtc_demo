@@ -803,32 +803,11 @@ void RtpVideoStreamReceiver2::OnRtpPacket(const RtpPacketReceived& packet) {
   // (packet_index == 0), since the value is constant within a frame.
   if (PerFrameLossTracker* tracker = g_per_frame_loss_tracker.load(std::memory_order_relaxed)) {
     FramePacketInfo frame_info;
-    static int pkt_count = 0, ext_count = 0;
-    pkt_count++;
     if (packet.GetExtension<FramePacketInfoExtension>(&frame_info)) {
-      ext_count++;
-      if (ext_count == 1) {
-        fprintf(stderr, "[RtpLossTracker] First extension parsed: seq=%u idx=%u total=%u (pkt %d/%d)\n",
-                frame_info.frame_sequence, frame_info.packet_index,
-                frame_info.total_packets, ext_count, pkt_count);
-      }
-      uint16_t target_bitrate_kbps = 0;
-      if (frame_info.packet_index == 0) {
-        packet.GetExtension<EncoderTargetBitrateExtension>(&target_bitrate_kbps);
-      }
       tracker->OnRtpPacket(
           frame_info.frame_sequence, frame_info.packet_index,
           frame_info.total_packets,
-          env_.clock().CurrentTime().us(),
-          target_bitrate_kbps);
-    }
-    if (pkt_count == 1000 && ext_count == 0) {
-      fprintf(stderr, "[RtpLossTracker] WARN: parsed 1000 RTP packets but 0 extensions\n");
-    }
-  } else {
-    static int null_warn = 0;
-    if (++null_warn == 1) {
-      fprintf(stderr, "[RtpLossTracker] Global pointer is NULL\n");
+          env_.clock().CurrentTime().us());
     }
   }
 

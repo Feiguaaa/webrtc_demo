@@ -26,8 +26,7 @@ class PerFrameLossObserver {
  public:
   virtual ~PerFrameLossObserver() = default;
   virtual void OnFrameComplete(uint16_t frame_seq, uint16_t total_sent,
-                               uint16_t received, int64_t timestamp_us,
-                               uint16_t target_bitrate_kbps) = 0;
+                               uint16_t received, int64_t timestamp_us) = 0;
 };
 
 // Tracks per-frame packet loss at the RTP layer.
@@ -38,8 +37,7 @@ class PerFrameLossTracker {
 
   // Call for each received RTP packet.
   void OnRtpPacket(uint16_t frame_seq, uint16_t packet_index,
-                   uint16_t total_packets, int64_t timestamp_us,
-                   uint16_t target_bitrate_kbps);
+                   uint16_t total_packets, int64_t timestamp_us);
 
   void Flush();
 
@@ -52,7 +50,6 @@ class PerFrameLossTracker {
     int64_t first_timestamp_us = 0;
     bool seen_total = false;
     uint32_t seen_indices = 0;  // bitmask for dedup (covers first 32 packets)
-    uint16_t target_bitrate_kbps = 0;
   };
 
   void EmitFrame(const FrameState& state);
